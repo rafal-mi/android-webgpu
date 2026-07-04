@@ -25,7 +25,7 @@ fun WebGpuSurface(modifier: Modifier = Modifier) {
             withContext(Dispatchers.Default) {
                 try {
                     // Initialize the renderer with the surface
-                    renderer.init(surface, width, height)
+                    renderer.initialize(surface, width, height)
                     // Render a frame.
                     renderer.render()
                 } catch (e: Exception) {

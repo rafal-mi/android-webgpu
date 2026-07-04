@@ -22,12 +22,41 @@ import androidx.webgpu.TextureFormat
 import androidx.webgpu.helper.WebGpu
 import androidx.webgpu.helper.createWebGpu
 import org.pinczow.webgpuapp.shader.TextResourceReader
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 
 class WebGpuRenderer(val context: Context) {
     private lateinit var webGpu: WebGpu
     private lateinit var renderPipeline: GPURenderPipeline
+    var vertexData: FloatBuffer? = null
+    var vertexDataSize: Int = 0
 
-    suspend fun init(surface: Surface, width: Int, height: Int) {
+    init {
+        val tableVerticesWithTriangles = floatArrayOf(
+            0.0f, 0.6f, 0f, 1f,
+            1f, 0f, 0f, 1f,
+
+            -0.5f, -0.6f, 0f, 1f,
+            0f, 1f, 0f, 1f,
+
+            0.5f, -0.6f, 0f, 1f,
+            0f, 0f, 1f, 1f,
+        )
+
+        vertexDataSize = tableVerticesWithTriangles.size * BYTES_PER_FLOAT
+
+        vertexData = ByteBuffer
+            .allocateDirect(vertexDataSize)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+
+        (vertexData as FloatBuffer).put(tableVerticesWithTriangles)
+
+
+    }
+
+    suspend fun initialize(surface: Surface, width: Int, height: Int) {
         // 1. Create Instance & Device
         webGpu = createWebGpu(surface)
         val device = webGpu.device
@@ -107,6 +136,16 @@ class WebGpuRenderer(val context: Context) {
         if (::webGpu.isInitialized) {
             webGpu.close()
         }
+    }
+
+    companion object {
+        const val POSITION_COMPONENT_COUNT = 2
+
+        const val BYTES_PER_FLOAT = 4
+
+        const val U_COLOR = "u_Color"
+
+        const val A_POSITION = "a_Position"
     }
 }
 
