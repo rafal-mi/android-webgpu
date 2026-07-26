@@ -2,6 +2,8 @@ package org.pinczow.webgpuapp
 
 import android.content.Context
 import android.view.Surface
+import androidx.webgpu.BufferUsage
+import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUDevice
@@ -73,6 +75,14 @@ class WebGpuRenderer(val context: Context) {
                 TextureFormat.RGBA8Unorm,
             )
         )
+    }
+
+    private fun createBuffer(device: GPUDevice) {
+        device.createBuffer(descriptor = GPUBufferDescriptor(
+            usage = BufferUsage.Vertex,
+            size = (vertexData as FloatBuffer).capacity().toLong()
+
+        ))
     }
 
     private fun initPipeline(device: GPUDevice) {
