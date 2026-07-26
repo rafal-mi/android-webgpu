@@ -28,11 +28,13 @@ fun WebGpuSurface(modifier: Modifier = Modifier) {
                     // Initialize the renderer with the surface
                     renderer.initialize(surface, width, height)
                     // Render a loop while the scope is active.
-                    renderer.render()
+                    while (isActive) {
+                        renderer.render()
+                        delay(16)
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "Exception when rendering: $e")
                 } finally {
-                    // Clean up resources when the surface is destroyed.
                     renderer.cleanup()
                 }
             }
