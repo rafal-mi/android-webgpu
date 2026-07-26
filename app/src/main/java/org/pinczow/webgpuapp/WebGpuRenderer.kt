@@ -34,6 +34,7 @@ import org.pinczow.webgpuapp.App.Companion.TAG
 import org.pinczow.webgpuapp.shader.TextResourceReader
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.FloatBuffer
 
 class WebGpuRenderer(val context: Context) {
     private var webGpu: WebGpu? = null
