@@ -8,7 +8,6 @@ import androidx.webgpu.GPUBuffer
 import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUColorTargetState
-import androidx.webgpu.GPUDevice
 import androidx.webgpu.GPUFragmentState
 import androidx.webgpu.GPUPipelineLayout
 import androidx.webgpu.GPUPipelineLayoutDescriptor
@@ -47,6 +46,10 @@ class WebGpuRenderer(val context: Context) {
     private var shaderModule: GPUShaderModule? = null
     private var pipelineLayout: GPUPipelineLayout? = null
     
+    // Per-frame reusable descriptor
+    private var renderPassDescriptor: GPURenderPassDescriptor? = null
+    private var colorAttachment: GPURenderPassColorAttachment? = null
+
     @Volatile
     private var isClosed = false
 
@@ -62,7 +65,7 @@ class WebGpuRenderer(val context: Context) {
 
         val shaderCode  = TextResourceReader.readTextFileFromResource(context, R.raw.shaders_fixed)
         val module = device.createShaderModule(
-            GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(shaderCode))
+            GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(shaderCode), label = "Main Shader")
         )
         shaderModule = module
 
@@ -75,7 +78,7 @@ class WebGpuRenderer(val context: Context) {
             )
         )
 
-        val layout = device.createPipelineLayout(GPUPipelineLayoutDescriptor(bindGroupLayouts = arrayOf()))
+        val layout = device.createPipelineLayout(GPUPipelineLayoutDescriptor(bindGroupLayouts = arrayOf(), label = "Pipeline Layout"))
         pipelineLayout = layout
 
         renderPipeline = device.createRenderPipeline(
@@ -83,7 +86,8 @@ class WebGpuRenderer(val context: Context) {
                 vertex = GPUVertexState(module, "vs_main", buffers = arrayOf(vertexBufferLayout)),
                 fragment = GPUFragmentState(module, "fs_main", targets = arrayOf(GPUColorTargetState(TextureFormat.RGBA8Unorm))),
                 primitive = GPUPrimitiveState(PrimitiveTopology.TriangleList),
-                layout = layout
+                layout = layout,
+                label = "Main Pipeline"
             )
         )
 
@@ -101,9 +105,19 @@ class WebGpuRenderer(val context: Context) {
         vByteBuffer.rewind()
 
         vertexBuffer = device.createBuffer(
-            GPUBufferDescriptor(BufferUsage.Vertex or BufferUsage.CopyDst, (vertexData.size * BYTES_PER_FLOAT).toLong())
+            GPUBufferDescriptor(BufferUsage.Vertex or BufferUsage.CopyDst, (vertexData.size * BYTES_PER_FLOAT).toLong(), label = "Vertex Buffer")
         )
         device.queue.writeBuffer(vertexBuffer!!, 0, vByteBuffer)
+        
+        // Initialize reusable render pass objects
+        colorAttachment = GPURenderPassColorAttachment(
+            clearValue = GPUColor(0.2, 0.0, 0.2, 1.0),
+            loadOp = LoadOp.Clear,
+            storeOp = StoreOp.Store,
+        )
+        renderPassDescriptor = GPURenderPassDescriptor(
+            colorAttachments = arrayOf(colorAttachment!!)
+        )
         
         Log.d(TAG, "Renderer initialized")
     }
@@ -112,6 +126,8 @@ class WebGpuRenderer(val context: Context) {
         val gpu = webGpu ?: return@withLock
         val pipeline = renderPipeline ?: return@withLock
         val vBuf = vertexBuffer ?: return@withLock
+        val descriptor = renderPassDescriptor ?: return@withLock
+        val attachment = colorAttachment ?: return@withLock
         if (isClosed) return@withLock
 
         try {
@@ -121,32 +137,25 @@ class WebGpuRenderer(val context: Context) {
                 return@withLock
             }
 
-            gpu.device.createCommandEncoder().use { commandEncoder ->
-                surfaceTexture.texture.createView().use { textureView ->
-                    commandEncoder.beginRenderPass(
-                        GPURenderPassDescriptor(
-                            colorAttachments = arrayOf(
-                                GPURenderPassColorAttachment(
-                                    clearValue = GPUColor(0.2, 0.0, 0.2, 1.0),
-                                    view = textureView,
-                                    loadOp = LoadOp.Clear,
-                                    storeOp = StoreOp.Store,
-                                )
-                            )
-                        )
-                    ).use { renderPass ->
-                        renderPass.setPipeline(pipeline)
-                        renderPass.setVertexBuffer(0, vBuf)
-                        renderPass.draw(3)
-                        renderPass.end()
-                    }
+            surfaceTexture.texture.use { texture ->
+                gpu.device.createCommandEncoder().use { commandEncoder ->
+                    texture.createView().use { textureView ->
+                        attachment.view = textureView
+                        
+                        commandEncoder.beginRenderPass(descriptor).use { renderPass ->
+                            renderPass.setPipeline(pipeline)
+                            renderPass.setVertexBuffer(0, vBuf)
+                            renderPass.draw(3)
+                            renderPass.end()
+                        }
 
-                    commandEncoder.finish().use { commandBuffer ->
-                        gpu.device.queue.submit(arrayOf(commandBuffer))
+                        commandEncoder.finish().use { commandBuffer ->
+                            gpu.device.queue.submit(arrayOf(commandBuffer))
+                        }
                     }
                 }
+                gpu.webgpuSurface.present()
             }
-            gpu.webgpuSurface.present()
             
             // Critical: Wait for GPU done before NEXT frame or surface changes
             gpu.device.queue.onSubmittedWorkDone()
@@ -172,7 +181,7 @@ class WebGpuRenderer(val context: Context) {
         vertexBuffer?.close()
         vertexBuffer = null
         
-        // webGpu?.close() // Current library version crashes on close
+        webGpu?.close()
         webGpu = null
     }
 
