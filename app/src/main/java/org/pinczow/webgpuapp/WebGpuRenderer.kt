@@ -1,7 +1,11 @@
 package org.pinczow.webgpuapp
 
 import android.content.Context
+import android.util.Log
 import android.view.Surface
+import androidx.webgpu.BufferUsage
+import androidx.webgpu.GPUBuffer
+import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUDevice
@@ -14,128 +18,181 @@ import androidx.webgpu.GPURenderPipelineDescriptor
 import androidx.webgpu.GPUShaderModuleDescriptor
 import androidx.webgpu.GPUShaderSourceWGSL
 import androidx.webgpu.GPUSurfaceConfiguration
+import androidx.webgpu.GPUVertexAttribute
+import androidx.webgpu.GPUVertexBufferLayout
 import androidx.webgpu.GPUVertexState
 import androidx.webgpu.LoadOp
 import androidx.webgpu.PrimitiveTopology
 import androidx.webgpu.StoreOp
+import androidx.webgpu.SurfaceGetCurrentTextureStatus
 import androidx.webgpu.TextureFormat
+import androidx.webgpu.VertexFormat
+import androidx.webgpu.VertexStepMode
 import androidx.webgpu.helper.WebGpu
 import androidx.webgpu.helper.createWebGpu
+import org.pinczow.webgpuapp.App.Companion.TAG
 import org.pinczow.webgpuapp.shader.TextResourceReader
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
 
 class WebGpuRenderer(val context: Context) {
-    private lateinit var webGpu: WebGpu
-    private lateinit var renderPipeline: GPURenderPipeline
-    var vertexData: FloatBuffer? = null
-    var vertexDataSize: Int = 0
+    private var webGpu: WebGpu? = null
+    private var renderPipeline: GPURenderPipeline? = null
+    private var vertexBuffer: GPUBuffer? = null
+    private var vertexByteBuffer: ByteBuffer? = null
+    
+    @Volatile
+    private var isClosed = false
+
+    private val rendererLock = Any()
 
     init {
-        val tableVerticesWithTriangles = floatArrayOf(
-            0.0f, 0.6f, 0f, 1f,
-            1f, 0f, 0f, 1f,
-
-            -0.5f, -0.6f, 0f, 1f,
-            0f, 1f, 0f, 1f,
-
-            0.5f, -0.6f, 0f, 1f,
-            0f, 0f, 1f, 1f,
+        val vertexData = floatArrayOf(
+            // x, y, z, w,  r, g, b, a
+            0.0f, 0.6f, 0f, 1f,  1f, 0f, 0f, 1f,
+            -0.5f, -0.6f, 0f, 1f, 0f, 1f, 0f, 1f,
+            0.5f, -0.6f, 0f, 1f, 0f, 0f, 1f, 1f,
         )
 
-        vertexDataSize = tableVerticesWithTriangles.size * BYTES_PER_FLOAT
-
-        vertexData = ByteBuffer
-            .allocateDirect(vertexDataSize)
-            .order(ByteOrder.nativeOrder())
-            .asFloatBuffer()
-
-        (vertexData as FloatBuffer).put(tableVerticesWithTriangles)
-
-
+        vertexByteBuffer = ByteBuffer.allocateDirect(vertexData.size * BYTES_PER_FLOAT).order(ByteOrder.nativeOrder())
+        vertexByteBuffer?.asFloatBuffer()?.put(vertexData)
     }
 
     suspend fun initialize(surface: Surface, width: Int, height: Int) {
-        // 1. Create Instance & Device
-        webGpu = createWebGpu(surface)
-        val device = webGpu.device
+        if (isClosed) return
+        Log.d(TAG, "Initializing renderer... width=$width, height=$height")
+        val gpu = createWebGpu(surface)
+        webGpu = gpu
+        val device = gpu.device
 
-        // 2. Setup Pipeline (compile shaders)
         initPipeline(device)
 
-        // 3. Configure the Surface
-        webGpu.webgpuSurface.configure(
+        gpu.webgpuSurface.configure(
             GPUSurfaceConfiguration(
-                device,
-                width,
-                height,
-                TextureFormat.RGBA8Unorm,
+                device = device,
+                width = width,
+                height = height,
+                format = TextureFormat.RGBA8Unorm,
             )
         )
+
+        val vBuffer = device.createBuffer(
+            GPUBufferDescriptor(
+                usage = BufferUsage.Vertex or BufferUsage.CopyDst,
+                size = (3 * 8 * BYTES_PER_FLOAT).toLong(),
+                label = "Vertex Buffer"
+            )
+        )
+        vertexBuffer = vBuffer
+        
+        vertexByteBuffer?.let {
+            it.rewind()
+            device.queue.writeBuffer(vBuffer, 0, it)
+        }
+        
+        // Wait for upload to complete
+        device.queue.onSubmittedWorkDone()
+        Log.d(TAG, "Renderer initialized")
     }
 
     private fun initPipeline(device: GPUDevice) {
-        val shaderCode  = TextResourceReader.readTextFileFromResource(context, R.raw.shaders)
+        if (isClosed) return
+        val shaderCode  = TextResourceReader.readTextFileFromResource(context, R.raw.shaders_fixed)
 
-        // Create Shader Module
         val shaderModule = device.createShaderModule(
             GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(shaderCode))
         )
 
-        // Create Render Pipeline
-        renderPipeline = device.createRenderPipeline(
-            GPURenderPipelineDescriptor(
-                vertex = GPUVertexState(
-                    shaderModule,
-                ), fragment = GPUFragmentState(
-                    shaderModule, targets = arrayOf(GPUColorTargetState(TextureFormat.RGBA8Unorm))
-                ), primitive = GPUPrimitiveState(PrimitiveTopology.TriangleList)
+        val vertexBufferLayout = GPUVertexBufferLayout(
+            arrayStride = 32L,
+            stepMode = VertexStepMode.Vertex,
+            attributes = arrayOf(
+                GPUVertexAttribute(VertexFormat.Float32x4, 0L, 0),
+                GPUVertexAttribute(VertexFormat.Float32x4, 16L, 1)
             )
         )
+
+        val pipelineDescriptor = GPURenderPipelineDescriptor.Builder(
+            GPUVertexState(
+                module = shaderModule,
+                entryPoint = "vs_main",
+                buffers = arrayOf(vertexBufferLayout)
+            )
+        ).setFragment(
+            GPUFragmentState(
+                module = shaderModule,
+                entryPoint = "fs_main",
+                targets = arrayOf(GPUColorTargetState(TextureFormat.RGBA8Unorm))
+            )
+        ).setPrimitive(GPUPrimitiveState(PrimitiveTopology.TriangleList))
+        .build()
+        
+        renderPipeline = device.createRenderPipeline(pipelineDescriptor)
     }
 
-    fun render() {
-        if (!::webGpu.isInitialized) {
-            return
-        }
+    fun render() = synchronized(rendererLock) {
+        val gpu = webGpu ?: return
+        val pipeline = renderPipeline ?: return
+        val vBuf = vertexBuffer ?: return
+        if (isClosed) return
 
-        val gpu = webGpu
+        try {
+            val surfaceTexture = gpu.webgpuSurface.getCurrentTexture()
+            if (surfaceTexture.status != SurfaceGetCurrentTextureStatus.SuccessOptimal &&
+                surfaceTexture.status != SurfaceGetCurrentTextureStatus.SuccessSuboptimal) {
+                return
+            }
 
-        // 1. Get the next available texture from the screen
-        val surfaceTexture = gpu.webgpuSurface.getCurrentTexture()
+            val texture = surfaceTexture.texture
+            val textureView = texture.createView()
 
-        // 2. Create a command encoder
-        val commandEncoder = gpu.device.createCommandEncoder()
-
-        // 3. Begin a render pass (clearing the screen to blue)
-        val renderPass = commandEncoder.beginRenderPass(
-            GPURenderPassDescriptor(
-                colorAttachments = arrayOf(
-                    GPURenderPassColorAttachment(
-                        GPUColor(0.0, 0.0, 0.5, 1.0),
-                        surfaceTexture.texture.createView(),
-                        loadOp = LoadOp.Clear,
-                        storeOp = StoreOp.Store,
+            val commandEncoder = gpu.device.createCommandEncoder()
+            val renderPass = commandEncoder.beginRenderPass(
+                GPURenderPassDescriptor(
+                    colorAttachments = arrayOf(
+                        GPURenderPassColorAttachment(
+                            clearValue = GPUColor(0.0, 0.0, 0.5, 1.0),
+                            view = textureView,
+                            loadOp = LoadOp.Clear,
+                            storeOp = StoreOp.Store,
+                        )
                     )
                 )
             )
-        )
 
-        // 4. Draw
-        renderPass.setPipeline(renderPipeline)
-        renderPass.draw(3) // Draw 3 vertices
-        renderPass.end()
+            renderPass.setPipeline(pipeline)
+            renderPass.setVertexBuffer(0, vBuf)
+            renderPass.draw(3, 1, 0, 0)
+            renderPass.end()
 
-        // 5. Submit and Present
-        gpu.device.queue.submit(arrayOf(commandEncoder.finish()))
-        gpu.webgpuSurface.present()
+            val commandBundle = commandEncoder.finish()
+            gpu.device.queue.submit(arrayOf(commandBundle))
+            gpu.webgpuSurface.present()
+            
+            // Minimal cleanup, let GC handle most for now to identify crash source
+            commandBundle.close()
+            commandEncoder.close()
+            renderPass.close()
+            textureView.close()
+            // NOT closing surface texture manually here
+        } catch (e: Exception) {
+            if (!isClosed) Log.e(TAG, "Error in render(): $e")
+        }
     }
 
-    fun cleanup() {
-        if (::webGpu.isInitialized) {
-            webGpu.close()
-        }
+    fun cleanup() = synchronized(rendererLock) {
+        if (isClosed) return
+        isClosed = true
+        Log.d(TAG, "Cleaning up renderer resources...")
+        
+        renderPipeline?.close()
+        renderPipeline = null
+        
+        vertexBuffer?.close()
+        vertexBuffer = null
+        
+        webGpu?.close()
+        webGpu = null
     }
 
     companion object {

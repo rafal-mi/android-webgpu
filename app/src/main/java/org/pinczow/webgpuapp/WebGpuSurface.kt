@@ -4,29 +4,30 @@ import android.util.Log
 import androidx.compose.foundation.AndroidExternalSurface
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.pinczow.webgpuapp.App.Companion.TAG
 
 @Composable
 fun WebGpuSurface(modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    // Create and remember a WebGpuRenderer instance.
-    val renderer = remember { WebGpuRenderer(context) }
     AndroidExternalSurface(
         modifier = modifier.fillMaxSize(),
     ) {
         // This block is called when the surface is created or resized.
         onSurface { surface, width, height ->
+            // Create a fresh renderer for this surface session.
+            val renderer = WebGpuRenderer(context)
             // Run the rendering logic on a background thread.
             withContext(Dispatchers.Default) {
                 try {
                     // Initialize the renderer with the surface
                     renderer.initialize(surface, width, height)
-                    // Render a frame.
+                    // Render a loop while the scope is active.
                     renderer.render()
                 } catch (e: Exception) {
                     Log.e(TAG, "Exception when rendering: $e")
